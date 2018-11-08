@@ -1,0 +1,21 @@
+</$objtype/mkfile
+
+TARG=label
+
+YFILES=calc.y
+HFILES=edit.h
+OFILES=\
+	edit.$O\
+	y.tab.$O\
+
+BIN=/$objtype/bin/disk
+
+UPDATE=\
+	mkfile\
+	edit.c\
+	${TARG:%=%.c}\
+	$HFILES\
+	$YFILES\
+	${TARG:%=/386/bin/disk/%}\
+
+</sys/src/cmd/mkmany
