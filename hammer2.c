@@ -74,8 +74,7 @@ void readvolume(int fd, hammer2_dev_t *hd) {
 			print("Available: %ulld Radixes: %ulb\n", block->check.freemap.avail, block->check.freemap.bigmask);
 		}
 	}
-	*/
 	//print("mirror_tid: %x freemap tid: %8.x bulkfree tid: %x\n", hd->voldata.mirror_tid, hd->voldata.freemap_tid, hd->voldata.bulkfree_tid);
-	return;
+	*/
 }
 

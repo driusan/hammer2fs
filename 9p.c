@@ -11,10 +11,13 @@
 #include "hammer2.h"
 #include "9phammer.h"
 #include "lz4.h"
+#include "xxhash.h"
+#include "faketypes.h"
 
 char *filename;
 int devfd;
 
+static ulong *crctab;
 void fileread(Req *r);
 
 void loadinodes(inode i, DirEnts *dirents);
@@ -205,7 +208,7 @@ start:
 		if (radix == 0) {
 			sysfatal("No radix");
 		}
-
+		
 		cur->offset++;
 		tmp = cur;
 
@@ -569,17 +572,20 @@ start:
 	int off = block->data_off & HAMMER2_OFF_MASK_LO;
 	int doff;
 	int keysize;
+	int radix = block->data_off & HAMMER2_OFF_MASK_RADIX;
+	int chksize = 1<<radix;
+	int dsize;
 
 	// Things for indirect blocks.
-	int radix;
-	int dsize;
 	int indblocks;
 	Aux *tmp;
 
+	long crc32;
+
 	switch (block->type) {
 	case HAMMER2_BREF_TYPE_INDIRECT:
-		radix = block->data_off & HAMMER2_OFF_MASK_RADIX;
-		dsize = 1<<radix;
+		dsize = chksize;
+		
 		keysize = (1<<block->keybits); 
 		if (r->ifcall.offset < block->key || r->ifcall.offset >= block->key + keysize){
 			cur->offset++;
@@ -629,11 +635,12 @@ start:
 		assert(r->ifcall.offset >= block->key);
 		assert(r->ifcall.offset < block->key + dsize);
 		pread(devfd, blockdata, HAMMER2_BLOCKREF_LEAF_MAX+1, block->data_off & HAMMER2_OFF_MASK_HI);
+
 		switch (HAMMER2_DEC_COMP(block->methods)){
 		case HAMMER2_COMP_NONE:
 			dp = (uchar *)blockdata + off;
 			doff = r->ifcall.offset-block->key;
-			nbytes = HAMMER2_BLOCKREF_LEAF_MAX+1-doff;
+			nbytes = chksize;
 			break;
 		case HAMMER2_COMP_LZ4:
 			csize = *(int*) &blockdata[off];
@@ -663,6 +670,38 @@ start:
 			return;
 		}
 
+		switch (HAMMER2_DEC_CHECK(block->methods)){
+		case HAMMER2_CHECK_NONE:
+		case HAMMER2_CHECK_DISABLED:
+			break;
+		case HAMMER2_CHECK_ISCSI32:
+			if(crctab == nil)
+				crctab = mkcrctab(0x82f63b78);
+
+			crc32 = blockcrc(crctab, 0, blockdata+off, chksize);
+			if(crc32 != block->check.iscsi32.value){
+				respond(r, "bad ISCSI32 checksum");
+				return;
+			}
+			break;
+		case HAMMER2_CHECK_SHA192:
+			respond(r, "checksum not implemented");
+			return;
+		case HAMMER2_CHECK_XXHASH64:
+			if(XXH64(blockdata+off, chksize, XXH_HAMMER2_SEED) != block->check.xxhash64.value) {
+				respond(r, "bad XXHASH64 checksum");
+				return;
+			}
+			break;
+		case HAMMER2_CHECK_FREEMAP:
+			// we shouldn't encounter a freemap while reading a file..
+			assert(0);
+		default:
+			respond(r, "unknown checksum format");
+			return;
+
+		}
+
 		// Now handle the actual return;
 		assert(rlen > 0 && rlen <= 8192);
 		if (r->ifcall.offset + rlen > orig.inode->meta.size) {
@@ -684,6 +723,7 @@ start:
 		assert(nbytes > 0);
 		assert(nbytes >= rlen);
 		r->ofcall.count = rlen;
+
 		respond(r, nil);
 
 		// Free the temp buffers we created, and cache the data in
@@ -693,6 +733,7 @@ start:
 		// Store the data read from disk in aux for future reads to
 		// bypass.
 		wlock(a);
+
 		free(a->cache.file.lastbuf);
 		a->cache.file.lastbuf = emalloc9p(nbytes);
 		assert(a->cache.file.lastbuf != nil);

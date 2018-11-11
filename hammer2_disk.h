@@ -1301,5 +1301,4 @@ union hammer2_media_data {
 
 typedef union hammer2_media_data hammer2_media_data_t;
 #pragma packed off
-#endif /* !_VFS_HAMMER2_DISK_H_ */
 

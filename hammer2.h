@@ -319,7 +319,6 @@ typedef struct hammer2_io hammer2_io_t;
  * A cluster's focus is set when it is locked.  The focus can only be set
  * to a chain still part of the synchronized set.
  */
-#endif
 #define HAMMER2_XOPFIFO		16
 #define HAMMER2_XOPFIFO_MASK	(HAMMER2_XOPFIFO - 1)
 #define HAMMER2_XOPGROUPS	32
@@ -413,4 +412,7 @@ TAILQ_HEAD(hammer2_pfslist, hammer2_pfs);
  * hammer2_cluster_check
  */
 #define HAMMER2_CHECK_NULL	0x00000001
+
+/* copied from hammer2_xxhash.h, we don't need the whole header */
+#define XXH_HAMMER2_SEED 0x4d617474446c6c6eLLU
 
