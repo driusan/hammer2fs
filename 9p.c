@@ -6,6 +6,10 @@
 #include <thread.h>
 #include <9p.h>
 
+// for sha2_256
+#include <mp.h>
+#include <libsec.h>
+
 #include "uuid.h"
 #include "hammer2_disk.h"
 #include "hammer2.h"
@@ -712,6 +716,7 @@ int verifycheck(hammer2_blockref_t *block, void *data) {
 	int radix = block->data_off & HAMMER2_OFF_MASK_RADIX;
 	int size = 1<<radix;
 	int r = 0;
+
 	switch (HAMMER2_DEC_CHECK(block->methods)){
 	case HAMMER2_CHECK_NONE:
 	case HAMMER2_CHECK_DISABLED:
@@ -723,9 +728,19 @@ int verifycheck(hammer2_blockref_t *block, void *data) {
 		r = (blockcrc(crctab, 0, data, size) == block->check.iscsi32.value);
 		break;
 	case HAMMER2_CHECK_SHA192:
-		print("check sha192\n");
-		// FIXME: Implement SHA192.
-		r = 0;
+		// I have no idea what the connection between this and sha192
+		// is, but it's the algorithm that DragonFly uses to calculate
+		// the sha192 hash in hammer2_chain.c.
+		{
+			union {
+				uchar digest8[SHA2_256dlen];
+				uvlong digest64[SHA2_256dlen/8];
+			} digest;
+
+			sha2_256(data, size, digest.digest8, nil);
+			digest.digest64[2] ^= digest.digest64[3];
+			r = (memcmp(digest.digest8, block->check.sha192.data, 24) == 0);
+		}
 		break;
 	case HAMMER2_CHECK_XXHASH64:
 		r = (XXH64(data, size, XXH_HAMMER2_SEED) == block->check.xxhash64.value);
