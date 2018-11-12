@@ -5,6 +5,9 @@
 #include <thread.h>
 #include <9p.h>
 
+// for crc32
+#include <flate.h>
+
 #include "uuid.h"
 #include "hammer2_disk.h"
 #include "hammer2.h"
@@ -61,7 +64,36 @@ void readvolume(int fd, hammer2_dev_t *hd) {
 		// printf("good magic");
 		// printf(" Total size: %u Free: %u\n", vol.allocator_size, vol.allocator_free);
 		// printf("Mirror_tid: %16d\n", vol.mirror_tid);
-		// FIXME: Check crcs here
+		if(icrc32(&vol, 512-4) != vol.icrc_sects[7]) {
+			fprint(2,"Invalid CRC for volume header sector 1\n");
+			continue;
+		}
+		if(icrc32(&vol.sroot_blockset, 512) != vol.icrc_sects[6]) {
+			fprint(2,"Invalid CRC for superoot block\n");
+			continue;
+		}
+		/*
+		These seem to always be 0 on real DragonFly systems, despite
+		the documentation in hammer2_disk.h claiming otherwise.
+		if(icrc32(vol.sector2, 512) != vol.icrc_sects[5]) {
+			fprint(2,"Invalid CRC for volume sector 2 got %ux want %x\n", icrc32(vol.sector2, 512), vol.icrc_sects[5]);
+			continue;
+		}
+		if(icrc32(vol.sector3, 512) != vol.icrc_sects[4]) {
+			fprint(2,"Invalid CRC for volume sector 3\n");
+			continue;
+		}
+		if(icrc32(&vol.freemap_blockset, 512) != vol.icrc_sects[3]) {
+			fprint(2,"Invalid CRC for volume freemap got %ux want %ux\n", icrc32(&vol.freemap_blockset, 512), vol.icrc_sects[3]);
+			continue;
+		}
+		// sector 5? 6? 7?
+		*/
+
+		if(icrc32(&vol, sizeof(hammer2_volume_data_t)-4) != vol.icrc_volheader) {
+			fprint(2, "Invalid full volume header CRC\n");
+			continue;
+		}
 		if(valid == 0 || hd->voldata.mirror_tid < vol.mirror_tid){
 			valid = 1;
 			hd->voldata = vol;

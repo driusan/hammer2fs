@@ -3,6 +3,7 @@ void dumpinode(hammer2_inode_data_t *i);
 void dumpblock(hammer2_blockref_t*);
 void readvolume(int fd, hammer2_dev_t *hd);
 char* loadblock(hammer2_blockref_t *block, void *dst, int dstsize, int *rsize);
+hammer2_crc32_t icrc32(void *buf, int n);
 
 void fsstart(Srv *);
 void fsattach(Req *r);

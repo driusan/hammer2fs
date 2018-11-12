@@ -66,3 +66,4 @@ void main(int argc, char *argv[])
 	postmountsrv(&fs, srvname, mtpt, mountflags);
 	exits(0);
 }
+

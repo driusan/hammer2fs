@@ -737,9 +737,7 @@ int verifycheck(hammer2_blockref_t *block, void *data) {
 		r = 1;
 		break;
 	case HAMMER2_CHECK_ISCSI32:
-		if(crctab == nil)
-			crctab = mkcrctab(0x82f63b78);
-		r = (blockcrc(crctab, 0, data, size) == block->check.iscsi32.value);
+		r = (icrc32(data, size) == block->check.iscsi32.value);
 		break;
 	case HAMMER2_CHECK_SHA192:
 		// I have no idea what the connection between this and sha192
@@ -816,5 +814,11 @@ char* loadblock(hammer2_blockref_t *block, void *dst, int dstsize, int *rsize) {
 		return "Unhandled compression";
 	}
 	return nil;
+}
+
+hammer2_crc32_t icrc32(void *data, int size) {
+	if(crctab == nil)
+		crctab = mkcrctab(0x82f63b78);
+	return blockcrc(crctab, 0, data, size);
 }
 
