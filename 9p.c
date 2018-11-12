@@ -21,13 +21,15 @@ static ulong *crctab;
 void fileread(Req *r);
 
 void loadinodes(inode i, DirEnts *dirents);
+int verifycheck(hammer2_blockref_t *block, void *data);
+char* loadblock(hammer2_blockref_t *block, void *dst, int dstsize, int *rsize);
 
 root_t root;
 
 
 typedef struct{
 	hammer2_tid_t inum;
-	hammer2_off_t loc;
+	hammer2_blockref_t block;
 } FEntry;
 
 
@@ -53,7 +55,7 @@ FEntry* getfentry(Qid q) {
 }
 
 // Creates an FEntry for an inode and adds it to the cached list.
-FEntry* mkinode(hammer2_tid_t inum, hammer2_off_t loc){
+FEntry* mkinode(hammer2_tid_t inum, hammer2_blockref_t block){
 	if (inum >= maxinodes) {
 		// FIXME: Be more intelligent about reallocs. We realloc twice
 		// as many to minimize the number of reallocs needed.
@@ -62,7 +64,7 @@ FEntry* mkinode(hammer2_tid_t inum, hammer2_off_t loc){
 	}
 	FEntry *dir = &inodes[inum];
 	dir->inum = inum;
-	dir->loc = loc;
+	dir->block = block;
 	return dir;
 }
 
@@ -74,21 +76,22 @@ void fsstart(Srv *) {
 	devfd = open(filename, OREAD);
 	readvolume(devfd, &hddev);
 	hammer2_volume_data_t vol = hddev.voldata;
-	for(i =0; i < 4; i++) {
+	for(i =0; i < HAMMER2_SET_COUNT; i++) {
 		if (vol.sroot_blockset.blockref[i].type == HAMMER2_BREF_TYPE_INODE) {
-			loadinode(devfd, vol.sroot_blockset.blockref[i].data_off, &suproot);
+			loadinode(&vol.sroot_blockset.blockref[i], &suproot);
+			
 			if (suproot.meta.pfs_type == HAMMER2_PFSTYPE_SUPROOT) {
 				// found the superroot, now found the mountable root
 				for(j = 0; j < 4; j++) {
 						if (suproot.u.blockset.blockref[j].type == HAMMER2_BREF_TYPE_INODE) {
-							loadinode(devfd, suproot.u.blockset.blockref[j].data_off, &root.inode);
+							loadinode(&suproot.u.blockset.blockref[j], &root.inode);
 							if (strcmp(root.pfsname, (char *)root.inode.filename) == 0) {
 								root.Qid = makeqid(root.meta.inum, QTDIR);
 								maxinodes = suproot.u.blockset.blockref[j].embed.stats.inode_count;
 								inodes = emalloc9p(maxinodes*sizeof(FEntry));
 								root.DirEnts.cap = 0;
 								root.DirEnts.count = 0;
-								mkinode(root.meta.inum, suproot.u.blockset.blockref[j].data_off);
+								mkinode(root.meta.inum, suproot.u.blockset.blockref[j]);
 								loadinodes(root, &root.DirEnts);
 								return;
 							} 
@@ -176,10 +179,10 @@ start:
 	int dsize;
 	int indblocks;
 	Aux *tmp;
-
+	char *err;
 	switch (block->type) {
 	case HAMMER2_BREF_TYPE_INODE: 
-		mkinode(block->key, block->data_off);
+		mkinode(block->key, *block);
 		cur->offset++;
 		goto start;
 	case HAMMER2_BREF_TYPE_EMPTY:
@@ -198,7 +201,6 @@ start:
 			}
 			dirents->entry[dirents->count++] = *block;
 		}
-		
 		cur->offset++;
 		goto start;
 	case HAMMER2_BREF_TYPE_INDIRECT:
@@ -223,7 +225,10 @@ start:
 
 		// Load the data from disk and start again at the new level
 		// of indirection.
-		pread(devfd, cur->blocks, dsize, block->data_off & HAMMER2_OFF_MASK);
+		err = loadblock(block, cur->blocks, dsize, nil);
+		if (err != nil) {
+			fprint(2, "loading err: %s\n", err);
+		}	
 		goto start;
 	default:
 		// For now assume if we got here something went wrong.
@@ -247,14 +252,14 @@ int cacheddirread(int n, Dir *dir, void *aux) {
 	}
 
 	inode i;
-	loadinode(devfd, f->loc, &i);
+	loadinode(&f->block, &i);
 	switch (i.meta.type) {
 		case HAMMER2_OBJTYPE_DIRECTORY:
 			dir->qid.type = QTDIR;
 			break;
 		case HAMMER2_OBJTYPE_REGFILE:
 		case HAMMER2_OBJTYPE_SOFTLINK:
-			dir->qid.type = QTDIR;
+			dir->qid.type = QTFILE;
 			break;
 		default:
 			printf("type %d\n", i.meta.type);
@@ -291,11 +296,15 @@ Qid loadsubdir(Aux *a, char *name) {
 		}
 
 		if (strcmp(name, block.check.buf) == 0) {
-			FEntry *fe;
 			inode in;
+			FEntry *fe;
 			r = makeqid(block.embed.dirent.inum, 0);
 			fe = getfentry(r);
-			loadinode(devfd, fe->loc, &in);
+			if (fe == nil) {
+				sysfatal("could not load inode");
+			}
+
+			loadinode(&fe->block, &in);
 			switch (in.meta.type) {
 			case HAMMER2_OBJTYPE_DIRECTORY:
 				r.type = QTDIR;
@@ -346,7 +355,7 @@ char* fswalk(Fid *fid, char *name, Qid *qid) {
 	}
 	FEntry *fe = getfentry(q);
 	a->inode = emalloc9p(sizeof(inode));
-	loadinode(devfd, fe->loc, a->inode);
+	loadinode(&fe->block, a->inode);
 
 	a->parent = nil;
 	a->blocks = &(a->inode->u.blockset.blockref[0]);
@@ -424,7 +433,7 @@ void fsstat(Req *r) {
 	}
 
 	inode i;
-	loadinode(devfd, f->loc, &i);
+	loadinode(&f->block, &i);
 	r->d.qid = r->fid->qid;
 	r->d.mode = i.meta.mode;
 	if (r->fid->qid.type == QTDIR){
@@ -561,26 +570,21 @@ start:
 
 	hammer2_blockref_t *block = &cur->blocks[cur->offset];
 
-	// the data on disk
-	uchar blockdata[HAMMER2_BLOCKREF_LEAF_MAX+1];
 	// the decompressed data
 	uchar decompr[HAMMER2_BLOCKREF_LEAF_MAX*2];
 	uchar *dp;
 	int rlen;
 	int nbytes;
-	int csize;
-	int off = block->data_off & HAMMER2_OFF_MASK_LO;
 	int doff;
 	int keysize;
 	int radix = block->data_off & HAMMER2_OFF_MASK_RADIX;
 	int chksize = 1<<radix;
 	int dsize;
+	char *err;
 
 	// Things for indirect blocks.
 	int indblocks;
 	Aux *tmp;
-
-	long crc32;
 
 	switch (block->type) {
 	case HAMMER2_BREF_TYPE_INDIRECT:
@@ -613,8 +617,11 @@ start:
 		cur = tmp;
 		// Load the data from disk and start again at the new level
 		// of indirection.
-		assert(HAMMER2_DEC_COMP(block->methods) == 0);
-		pread(devfd, cur->blocks, dsize, block->data_off & HAMMER2_OFF_MASK);
+		err = loadblock(block, cur->blocks, dsize, &nbytes);
+		if (err != nil) {
+			respond(r, err);
+			goto cleanup;
+		}
 		goto start;
 	case HAMMER2_BREF_TYPE_DATA:
 		cur->offset++;
@@ -634,73 +641,13 @@ start:
 		
 		assert(r->ifcall.offset >= block->key);
 		assert(r->ifcall.offset < block->key + dsize);
-		pread(devfd, blockdata, HAMMER2_BLOCKREF_LEAF_MAX+1, block->data_off & HAMMER2_OFF_MASK_HI);
 
-		switch (HAMMER2_DEC_COMP(block->methods)){
-		case HAMMER2_COMP_NONE:
-			dp = (uchar *)blockdata + off;
-			doff = r->ifcall.offset-block->key;
-			nbytes = chksize;
-			break;
-		case HAMMER2_COMP_LZ4:
-			csize = *(int*) &blockdata[off];
-			nbytes = LZ4_decompress_safe((char *)blockdata+off+4, (char *)decompr, csize, HAMMER2_BLOCKREF_LEAF_MAX*2);
-			if (nbytes < 0) {
-				printf("err: %d\n", nbytes);
-				respond(r, "bad read");
-				return;
-			}
-			dp = &decompr[0];
-			break;
-		case HAMMER2_COMP_ZLIB:
-			inflateinit();
-			nbytes = inflatezlibblock(
-				decompr, HAMMER2_BLOCKREF_LEAF_MAX*2,
-				&blockdata[off], HAMMER2_BLOCKREF_LEAF_MAX-off
-			);
-			dp = &decompr[0];
-			if (nbytes < 0){
-				respond(r, flateerr(nbytes));
-				return;
-			}
-			break;
-		default:
-			// FIXME: Add AUTOZERO and ZLIB
-			respond(r, "Unhandled compression");
-			return;
+		err = loadblock(block, decompr, HAMMER2_BLOCKREF_LEAF_MAX*2, &nbytes);
+		if (err != nil) {
+			respond(r, err);
+			goto cleanup;
 		}
-
-		switch (HAMMER2_DEC_CHECK(block->methods)){
-		case HAMMER2_CHECK_NONE:
-		case HAMMER2_CHECK_DISABLED:
-			break;
-		case HAMMER2_CHECK_ISCSI32:
-			if(crctab == nil)
-				crctab = mkcrctab(0x82f63b78);
-
-			crc32 = blockcrc(crctab, 0, blockdata+off, chksize);
-			if(crc32 != block->check.iscsi32.value){
-				respond(r, "bad ISCSI32 checksum");
-				return;
-			}
-			break;
-		case HAMMER2_CHECK_SHA192:
-			respond(r, "checksum not implemented");
-			return;
-		case HAMMER2_CHECK_XXHASH64:
-			if(XXH64(blockdata+off, chksize, XXH_HAMMER2_SEED) != block->check.xxhash64.value) {
-				respond(r, "bad XXHASH64 checksum");
-				return;
-			}
-			break;
-		case HAMMER2_CHECK_FREEMAP:
-			// we shouldn't encounter a freemap while reading a file..
-			assert(0);
-		default:
-			respond(r, "unknown checksum format");
-			return;
-
-		}
+		dp = &decompr[0];
 
 		// Now handle the actual return;
 		assert(rlen > 0 && rlen <= 8192);
@@ -727,7 +674,7 @@ start:
 		respond(r, nil);
 
 		// Free the temp buffers we created, and cache the data in
-		// lastbuf for the next calls to pread now that we've sent
+		// lastbuf for the next calls to read now that we've sent
 		// the response.
 
 		// Store the data read from disk in aux for future reads to
@@ -741,16 +688,7 @@ start:
 		a->cache.file.lastbufoffset = block->key;
 		a->cache.file.lastbufcount = nbytes;
 		wunlock(a);
-
-		// Ensure there's no Aux memory leaks.
-		while(cur->parent != nil) {
-			Aux *tmp = cur;
-			cur = cur->parent;
-
-			free(tmp->blocks);
-			free(tmp);
-		}
-		return;
+		goto cleanup;
 	case HAMMER2_BREF_TYPE_EMPTY:
 		cur->offset++;
 		goto start;
@@ -758,5 +696,96 @@ start:
 		printf("Type %d\n", block->type);
 		sysfatal("Unhandled type");
 	}
+
+cleanup:
+	// Ensure there's no Aux memory leaks.
+	while(cur->parent != nil) {
+		Aux *tmp = cur;
+		cur = cur->parent;
+		free(tmp->blocks);
+		free(tmp);
+	}
+	return;
+}
+
+int verifycheck(hammer2_blockref_t *block, void *data) {
+	int radix = block->data_off & HAMMER2_OFF_MASK_RADIX;
+	int size = 1<<radix;
+	int r = 0;
+	switch (HAMMER2_DEC_CHECK(block->methods)){
+	case HAMMER2_CHECK_NONE:
+	case HAMMER2_CHECK_DISABLED:
+		r = 1;
+		break;
+	case HAMMER2_CHECK_ISCSI32:
+		if(crctab == nil)
+			crctab = mkcrctab(0x82f63b78);
+		r = (blockcrc(crctab, 0, data, size) == block->check.iscsi32.value);
+		break;
+	case HAMMER2_CHECK_SHA192:
+		print("check sha192\n");
+		// FIXME: Implement SHA192.
+		r = 0;
+		break;
+	case HAMMER2_CHECK_XXHASH64:
+		r = (XXH64(data, size, XXH_HAMMER2_SEED) == block->check.xxhash64.value);
+		break;
+	case HAMMER2_CHECK_FREEMAP:
+		// we shouldn't encounter a freemap while reading a file..
+		assert(0);
+		break;
+	default:
+		r = 0;
+	}
+	return r;
+}
+
+/* Loads the block pointed to at data_off into dst (after decompression), and
+ stores the size in rsize.
+ Returns an error string if smething went wrong.
+ Also validates check code */
+char* loadblock(hammer2_blockref_t *block, void *dst, int dstsize, int *rsize) {
+	uchar blockdata[HAMMER2_BLOCKREF_LEAF_MAX+1];
+	int dsize = 1<<(block->data_off & HAMMER2_OFF_MASK_RADIX);
+	int off = block->data_off & HAMMER2_OFF_MASK_LO;
+	int csize;
+	int decsize;
+
+	pread(devfd, blockdata, HAMMER2_BLOCKREF_LEAF_MAX+1, block->data_off & HAMMER2_OFF_MASK_HI);
+	if (!verifycheck(block, &blockdata[off])) {
+		return "invalid checksum";
+	}
+	switch (HAMMER2_DEC_COMP(block->methods)){
+	case HAMMER2_COMP_AUTOZERO:
+	case HAMMER2_COMP_NONE:
+		if (rsize != nil)
+			*rsize = dsize;
+		memcpy(dst, &blockdata[off] , dsize); 
+		break;
+	case HAMMER2_COMP_LZ4:
+		csize = *(int*) &blockdata[off];
+		decsize = LZ4_decompress_safe((char *)blockdata+off+4, (char *)dst, csize, dstsize);
+		if (decsize < 0)
+			return "bad read";
+		if (rsize != nil)
+			*rsize = decsize;
+		break;
+	case HAMMER2_COMP_ZLIB:
+		inflateinit();
+		decsize = inflatezlibblock(
+			dst, dstsize,
+			&blockdata[off], HAMMER2_BLOCKREF_LEAF_MAX-off
+		);
+		if (decsize < 0){
+			return flateerr(*rsize);
+		}
+		if (rsize != nil)
+			*rsize = decsize;
+		break;
+	default:
+		printf("Comp: %d\n", HAMMER2_DEC_COMP(block->methods));
+		return "Unhandled compression";
+	}
+	return nil;
 }
 

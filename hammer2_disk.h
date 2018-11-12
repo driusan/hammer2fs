@@ -759,10 +759,6 @@ struct hammer2_blockset {
 typedef struct hammer2_blockset hammer2_blockset_t;
 
 /*
- * Catch programmer snafus
- */
-
-/*
  * hammer2_bmap_data - A freemap entry in the LEVEL1 block.
  *
  * Each 128-byte entry contains the bitmap and meta-data required to manage
