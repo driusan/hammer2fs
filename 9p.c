@@ -279,8 +279,14 @@ int cacheddirread(int n, Dir *dir, void *aux) {
 	if (block.embed.dirent.namlen <= 64)
 		dir->name = estrdup9p(block.check.buf);
 	else {
-		// FIXME: Figure out how/where these are stored in hammer2
-		sysfatal("Long file names not supported");
+		char *err;
+		char data[HAMMER2_BLOCKREF_LEAF_MAX+1];
+		int size;
+		err = loadblock(&block, data, HAMMER2_BLOCKREF_LEAF_MAX, &size);
+		if (err != nil){
+			fprint(2, "%s\n", err);
+		}
+		dir->name = estrdup9p(data);
 	}
 
 	// FIXME: Get from uid/gid from inode and parse /etc/passwd (
@@ -293,13 +299,23 @@ int cacheddirread(int n, Dir *dir, void *aux) {
 Qid loadsubdir(Aux *a, char *name) {
 	int i;
 	Qid r; 
+	char namedata[HAMMER2_BLOCKREF_LEAF_MAX+1];
 	for(i=0; i < a->cache.dir.count; i++){
+		char *ename;
 		hammer2_blockref_t block = a->cache.dir.entry[i];
 		if (block.embed.dirent.namlen > 64) {
-			sysfatal("Long file names not supported");
+			char *err;
+			int size;
+			err = loadblock(&block, namedata, HAMMER2_BLOCKREF_LEAF_MAX, &size);
+			if (err != nil){
+				fprint(2, "%s\n", err);
+			}
+			ename = namedata;
+		} else {
+			ename = block.check.buf;
 		}
 
-		if (strcmp(name, block.check.buf) == 0) {
+		if (strncmp(name, ename, block.embed.dirent.namlen) == 0) {
 			inode in;
 			FEntry *fe;
 			r = makeqid(block.embed.dirent.inum, 0);
@@ -307,7 +323,6 @@ Qid loadsubdir(Aux *a, char *name) {
 			if (fe == nil) {
 				sysfatal("could not load inode");
 			}
-
 			loadinode(&fe->block, &in);
 			switch (in.meta.type) {
 			case HAMMER2_OBJTYPE_DIRECTORY:
@@ -321,7 +336,6 @@ Qid loadsubdir(Aux *a, char *name) {
 				printf("%s type %d\n", name, in.meta.type);
 				sysfatal("Unhandled OBJTYPE");
 			}
-
 		}
 	}
 	r.path = 0;

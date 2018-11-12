@@ -15,8 +15,8 @@ partition is named sdE0.)
 
 hammer2fs reads a hammer2 partition (by default /dev/sdE0/hammer2) and
 serves it over 9p.  It posts to /srv/hammer2.  It's currently
-read-only and doesn't handle long filenames (>64 characters) and will
-likely remain read-only for the foreseeable future.
+read-only and and will likely remain read-only for the foreseeable
+future.
 
 lz4.^(c h) are a port of the basic lz4 library.  I mostly just removed
 #ifdefs for other operating systems/compilers and changed the types to
