@@ -372,7 +372,9 @@ char* fswalk(Fid *fid, char *name, Qid *qid) {
 		}
 	}
 	FEntry *fe = getfentry(q);
+
 	a->inode = emalloc9p(sizeof(inode));
+
 	loadinode(&fe->block, a->inode);
 
 	a->parent = nil;

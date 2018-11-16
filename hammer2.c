@@ -13,6 +13,8 @@
 #include "hammer2.h"
 #include "9phammer.h"
 
+hammer2_volume_data_t volumehdr;
+
 // Loads an inode from dataoff in fd into the inode argument.
 void loadinode(hammer2_blockref_t *block, hammer2_inode_data_t *inode) {
 	char *err = loadblock(block, inode, sizeof(hammer2_inode_data_t), nil);
@@ -100,12 +102,15 @@ void readvolume(int fd, hammer2_dev_t *hd) {
 			hd->volhdrno = i;
 		}
 	}
+	volumehdr = vol;
+	/*
 	print("Using volume header #%d\n", hd->volhdrno);
 	print("Volume size: %ulld\n", hd->voldata.allocator_size);
 	print("Freemap version: %d\n", hd->voldata.freemap_version);
 	print("Allocator size: %ulld\n", hd->voldata.volu_size);
 	print("Allocator free: %ulld\n", hd->voldata.allocator_free);
 	print("Allocator beg: %ulld\n", hd->voldata.allocator_beg);
+	*/
 
 	/*
 	For looking into the freemap on start/debugging

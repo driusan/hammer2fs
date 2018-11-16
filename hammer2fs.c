@@ -16,7 +16,10 @@ extern char *filename;
 extern root_t root;
 extern int devfd;
 
-Srv fs = {
+void mythreadpostmountsrv(Srv *s, char *name, char *mtpt, int flag);
+
+
+static Srv fs = {
 	.open = fsopen,
 	.attach = fsattach,
 	.start = fsstart,
@@ -30,7 +33,7 @@ void usage(void) {
 	fprint(2, "usage: %s [-r root] [-S srvname] [-f devicename]\n", argv0);
 }
 
-void main(int argc, char *argv[])
+void threadmain(int argc, char *argv[])
 {
 	char *srvname = "hammer2";
 	char *mtpt = nil;
@@ -61,9 +64,8 @@ void main(int argc, char *argv[])
 	if (root.pfsname == nil) {
 		root.pfsname = "ROOT";
 	}
-	if(mountflags == 0)
-		mountflags = MREPL | MCREATE;
-	postmountsrv(&fs, srvname, mtpt, mountflags);
-	exits(0);
+	initcons(srvname);
+	mythreadpostmountsrv(&fs, srvname, nil, 0);
+	threadexits(nil);
 }
 

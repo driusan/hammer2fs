@@ -5,7 +5,9 @@ TARG=hammer2fs
 OFILES=hammer2.$O \
 	lz4.$O \
 	9p.$O \
-	xxhash.$O
+	xxhash.$O \
+	cons.$O \
+	thread.$O
 
 lz4.$O:
 	$CC -FTV lz4.c
