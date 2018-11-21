@@ -315,7 +315,7 @@ Qid loadsubdir(Aux *a, char *name) {
 			ename = block.check.buf;
 		}
 
-		if (strncmp(name, ename, block.embed.dirent.namlen) == 0) {
+		if (strcmp(name, ename) == 0) {
 			inode in;
 			FEntry *fe;
 			r = makeqid(block.embed.dirent.inum, 0);
