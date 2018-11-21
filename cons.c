@@ -70,7 +70,10 @@ static void consproc(void *v){
 			continue;
 		rc = tokenize(s, args, MAXARGS);
 		if(rc == 0) {
-			goto bad;
+			// if we got an empty line, don't print a bad command error
+			// but free s.
+			print("\n");
+			goto good;
 		}
 		for(c = cmds; c < cmds + nelem(cmds); c++) {
 			if(strcmp(c->name, args[0]) == 0) {
@@ -82,7 +85,7 @@ static void consproc(void *v){
 		}
 
 	bad:
-		print("bad command\n");
+		print("bad command: %s\n", s);
 	good:
 		free(s);
 	}	
@@ -99,7 +102,7 @@ void initcons(char *service){
 	pipe(pfd);
 	fprint(fd, "%d", pfd[1]);
 	Binit(&bio, pfd[0], OREAD);
-
-
+	// send print to the command pipe
+	dup(pfd[0], 1);
 	procrfork(consproc, &bio, mainstacksize,0);
 }
