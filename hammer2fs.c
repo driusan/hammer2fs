@@ -36,8 +36,6 @@ void usage(void) {
 void threadmain(int argc, char *argv[])
 {
 	char *srvname = "hammer2";
-	char *mtpt = nil;
-	int mountflags = 0;
 
 	ARGBEGIN{
 	case 'D':
