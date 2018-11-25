@@ -36,6 +36,14 @@ typedef struct{
 	hammer2_blockref_t block;
 } FEntry;
 
+typedef struct fileblocklist fileblocklist_t;
+struct fileblocklist {
+	hammer2_key_t start;
+	hammer2_key_t end;
+
+	hammer2_blockref_t* datablock;
+	fileblocklist_t *next;
+};
 
 u64int maxinodes;
 FEntry *inodes;
@@ -128,7 +136,9 @@ struct Aux {
 		struct {
 			uchar *lastbuf;
 			vlong lastbufoffset;
-			vlong lastbufcount;
+			int lastbufcount;
+
+			fileblocklist_t *datablocks;
 		} file;
 
 		DirEnts dir;
@@ -427,10 +437,118 @@ char* fswalkclone(Fid *old, Fid *new) {
 	return nil;
 }
 
+typedef struct fileblocklist fileblocklist_t;
+
+fileblocklist_t* loaddatablocklist(inode *in) {
+	fileblocklist_t* headn = nil;
+	fileblocklist_t* curn = nil;
+	if (in->meta.op_flags & HAMMER2_OPFLAG_DIRECTDATA) {
+		return nil;
+	}
+
+	Aux *orig = emalloc9p(sizeof(Aux));
+	Aux *cur;
+	orig->parent = nil;
+
+	// Make a copy of the blockset so that we don't can just assume that
+	// everything needs to be freed in the end.
+	orig->blocks = emalloc9p(sizeof(hammer2_blockset_t));
+	memcpy(orig->blocks, &in->u.blockset, sizeof(hammer2_blockset_t));
+	orig->offset = 0;
+	orig->count = 4;
+	cur = orig;
+
+
+	Aux *tmp;
+	char *err;
+	int nbytes;
+	int radix;
+	int chksize;
+
+	while(cur != nil){
+nextlevel:
+		for(int i = cur->offset; i < cur->count; i++) {
+			// save i at the next block for the next indirection level
+			// to pick up where we left off when there's an indirect
+			// block.
+			// at the same place.
+			cur->offset = i+1;
+
+			hammer2_blockref_t *block = &cur->blocks[i];
+
+			switch(block->type){
+			case HAMMER2_BREF_TYPE_DATA:
+				// add a new fileblocklist_t to the end of the
+				// list with the current block.
+				if(headn == nil) {
+					headn = emalloc9p(sizeof(fileblocklist_t));
+					curn = headn;
+				} else {
+					curn->next = emalloc9p(sizeof(fileblocklist_t));
+					curn = curn->next;
+				}
+				curn->next = nil;
+				curn->start = block->key;
+				curn->end = block->key + (1<<block->keybits);
+				if(curn->end > in->meta.size){
+					curn->end  = in->meta.size;
+				}
+
+				// Make a copy so that this indirection level (including
+				// any empty or indirect ones that we don't care about
+				// after our list is complete) can be freed when we.
+				// exit.
+				curn->datablock = emalloc9p(sizeof(hammer2_blockref_t));
+				memcpy(curn->datablock, block, sizeof(hammer2_blockref_t));
+
+				break;
+			case HAMMER2_BREF_TYPE_INDIRECT:
+				tmp = cur;
+				cur = emalloc9p(sizeof(Aux));
+				cur->parent = tmp;
+
+				cur->blocks = emalloc9p(HAMMER2_PBUFSIZE);
+				cur->offset = 0;
+
+				radix = block->data_off & HAMMER2_OFF_MASK_RADIX;
+				chksize = 1<<radix;
+				cur->count = chksize / sizeof(hammer2_blockref_t);
+
+				err = loadblock(block, cur->blocks, chksize, &nbytes);
+				if(err != nil){
+					sysfatal(err);
+				}
+				goto nextlevel;
+			case HAMMER2_BREF_TYPE_EMPTY:
+				// don't care
+				break;
+			default:
+				sysfatal("Unhandled BREF type while loading file");
+			}
+		}
+
+		tmp = cur;
+		cur = cur->parent;
+
+		free(tmp->blocks);
+		free(tmp);
+	}
+	return headn;
+}
+
 void fsopen(Req *r) {
+	Aux *a = r->fid->aux;
 	if (r->fid->qid.path == root.Qid.path) {
-		Aux *a = r->fid->aux;
 		a->cache.dir = root.DirEnts;
+	}
+	if (r->fid->qid.type == QTFILE){
+		inode *i = a->inode;
+		if (i->meta.op_flags & HAMMER2_OPFLAG_DIRECTDATA) {
+			// Nothing, content is embedded in inode
+		} else {
+			a->cache.file.datablocks = loaddatablocklist(i);
+		}
+
 	}
 	respond(r, nil);
 }
@@ -486,36 +604,32 @@ void fsread(Req *r) {
 }
 
 void fileread(Req *r) {
-	// Copy aux so that we can mutate it without messing up other reads.
-	Aux orig = *(Aux*)(r->fid->aux);
-	Aux *cur;
-	orig.parent = nil;
-	orig.blocks = &orig.inode->u.blockset.blockref[0];
-	orig.offset = 0;
-	orig.count = 4;
-	cur = &orig;
-
+	Aux *a = r->fid->aux;
 	// Reading at/past EOF.
-	if (r->ifcall.offset >= orig.inode->meta.size) {
+	if (r->ifcall.offset == a->inode->meta.size) {
 		r->ofcall.count = 0;
 		respond(r, nil);
+		return;
+	} else if(r->ifcall.offset > a->inode->meta.size) {
+		r->ofcall.count = -1;
+		respond(r, "read past end of file");
 		return;
 	}
 
 	// If data is stored in the inode, don't bother getting anything from
 	// disk.
-	if (orig.inode->meta.op_flags & HAMMER2_OPFLAG_DIRECTDATA) {
-		assert(orig.inode->meta.size > r->ifcall.offset);
+	if (a->inode->meta.op_flags & HAMMER2_OPFLAG_DIRECTDATA) {
+		assert(a->inode->meta.size > r->ifcall.offset);
 		assert(r->ifcall.offset < HAMMER2_EMBEDDED_BYTES);
-		int size = orig.inode->meta.size - r->ifcall.offset;
-		memcpy(r->ofcall.data, (void *)&orig.inode->u.data[r->ifcall.offset], size);
+		int size = a->inode->meta.size - r->ifcall.offset;
+		memcpy(r->ofcall.data, (void *)&a->inode->u.data[r->ifcall.offset], size);
 		r->ofcall.count = size;
 		respond(r, nil);
 		return;
 	}
 
-	// Check if it's in the data read from the last read before doing anything
-	Aux *a = r->fid->aux;
+	// Check if it's in the data read from the last block before doing
+	// anything.
 	rlock(a);
 	if (a->cache.file.lastbufcount > 0 
 		&& r->ifcall.offset >= a->cache.file.lastbufoffset 
@@ -524,9 +638,9 @@ void fileread(Req *r) {
 		// It's still cached from the last read, so just copy it from memory.
 		int count = r->ifcall.count;
 		int offstart = r->ifcall.offset - a->cache.file.lastbufoffset;
-		if (count + r->ifcall.offset > orig.inode->meta.size) {
+		if (count + r->ifcall.offset > a->inode->meta.size) {
 			// Ensure we don't send past EOF.
-			count = orig.inode->meta.size - r->ifcall.offset;
+			count = a->inode->meta.size - r->ifcall.offset;
 		}
 		if (count + offstart > a->cache.file.lastbufcount) {
 			// We can only send as many bytes as are in lastbuf.
@@ -543,188 +657,65 @@ void fileread(Req *r) {
 	}
 	runlock(a);
 
-	// Autozero is the address we report nils until if there's holes in the
-	// file. It starts at the end of the file, and shrinks every time we
-	// find a block who starts > offset and < current autozero. When the
-	// loop finishes, we should have either found the block that covers
-	// offset, or this should be the closest block to it that we've found,
-	// which can be used to calculate the number of nils to send.
-	int autozero = orig.inode->meta.size;
+	hammer2_blockref_t *block = nil;
 
-	// Now find the block that contains r->ifcall.offset.
-start:
-	while(cur->offset >= cur->count) {
-		if (cur->parent == nil) {
-			if(autozero > 0) {
-				// An indirect block said it covered this range,
-				// but there were no data blocks for it, so assume
-				// nil.
-				int count = r->ifcall.count;
-				if(r->ifcall.offset + count > autozero){
-					// handle the case where the hole was in
-					// the middle.
-					count = autozero - r->ifcall.offset;
-				}
-
-				if(r->ifcall.offset + count > orig.inode->meta.size){
-					// make sure we don't add more nils than
-					// exist in the file.
-					count = orig.inode->meta.size - r->ifcall.offset;
-				}
-
-				memset(r->ofcall.data, 0, count);
-				r->ofcall.count = count;
-				respond(r, nil);
-			} else {
-				respond(r, "could not find data");
-			}
-			return;
+	// for autozero
+	fileblocklist_t *cur;
+	hammer2_key_t nearest = a->inode->meta.size;
+	for(cur = a->cache.file.datablocks; cur != nil; cur = cur->next){
+		nearest = cur->start;
+		assert(cur->end > cur->start);
+		if(r->ifcall.offset >= cur->start && r->ifcall.offset < cur->end){
+			// Found the block.
+			block = cur->datablock;
+			break;
+		} else if (cur->start > r->ifcall.offset) {
+			// Passed the block and never found it.
+			// FIXME: This assumes the list is sorted, but we haven't
+			// done anything to guarantee that. (It seems to be the
+			// case on disk from DragonFly, regardless.			
+			nearest = cur->start;
+			break;
 		}
-		Aux *tmp = cur;
-
-		cur = tmp->parent;
-
-		free(tmp->blocks);
-		free(tmp);
 	}
-
-	hammer2_blockref_t *block = &cur->blocks[cur->offset];
-
-	// the decompressed data
-	uchar decompr[HAMMER2_BLOCKREF_LEAF_MAX*2];
-	uchar *dp;
-	int rlen;
-	int nbytes;
-	int doff;
-	int keysize;
-	int radix = block->data_off & HAMMER2_OFF_MASK_RADIX;
-	int chksize = 1<<radix;
-	int dsize;
-	char *err;
-
-	// Things for indirect blocks.
-	int indblocks;
-	Aux *tmp;
-
-	switch (block->type) {
-	case HAMMER2_BREF_TYPE_INDIRECT:
-		dsize = chksize;
-		
-		keysize = (1<<block->keybits); 
-		if (r->ifcall.offset < block->key || r->ifcall.offset >= block->key + keysize){
-			cur->offset++;
-			goto start;
+	if(block == nil){
+		// No block was found, so fill the zero hole.
+		assert(nearest > r->ifcall.offset);
+		int count = nearest-r->ifcall.offset;
+		if(count > r->ifcall.count) {
+			count = r->ifcall.count;
 		}
-		indblocks = dsize / sizeof(hammer2_blockref_t);
-		if (radix == 0) {
-			sysfatal("No radix");
-		}
-
-		// We hijack aux for the indirect block and move the existing
-		// one somewhere else, so that future calls
-		// pick up at the same level of indirection once we've found
-		// a DIRENT.
-		cur->offset++;
-		tmp = emalloc9p(sizeof(Aux));
-		tmp->inode = cur->inode;
-		tmp->parent = cur;
-		tmp->blocks = emalloc9p(HAMMER2_PBUFSIZE);
-		tmp->offset = 0;
-		tmp->count = indblocks;
-		tmp->parent = cur;
-		tmp->cache.file.lastbufcount = 0;
-
-		cur = tmp;
-		// Load the data from disk and start again at the new level
-		// of indirection.
-		err = loadblock(block, cur->blocks, dsize, &nbytes);
-		if (err != nil) {
-			respond(r, err);
-			goto cleanup;
-		}
-		goto start;
-	case HAMMER2_BREF_TYPE_DATA:
-		cur->offset++;
-		dsize = 1<<block->keybits;
-		if (r->ifcall.offset < block->key || r->ifcall.offset >= block->key + dsize) {
-			if (block->key < autozero && block->key > r->ifcall.offset){
-				// This block doesn't cover offset, but it's the
-				// closest we've found so far.
-				autozero = block->key;
-			}
-			goto start;
-		}
-		rlen = r->ifcall.count < dsize ? r->ifcall.count : dsize;
-		if (rlen > cur->inode->meta.size) {
-			rlen = cur->inode->meta.size;
-		}
-		
-		assert(r->ifcall.offset >= block->key);
-		assert(r->ifcall.offset < block->key + dsize);
-
-		err = loadblock(block, decompr, HAMMER2_BLOCKREF_LEAF_MAX*2, &nbytes);
-		if (err != nil) {
-			respond(r, err);
-			goto cleanup;
-		}
-		dp = &decompr[0];
-
-		// Now handle the actual return;
-		assert(rlen > 0 && rlen <= 8192);
-		if (r->ifcall.offset + rlen > orig.inode->meta.size) {
-			rlen = orig.inode->meta.size - r->ifcall.offset;
-		}
-		if (nbytes < rlen) {
-			assert(nbytes > 0);
-			rlen = nbytes;
-		}
-		if(r->ifcall.offset + rlen > block->key + dsize){
-			// it spans multiple blocks, so only send the part
-			// that's in this block in this read.
-			rlen = block->key + dsize - r->ifcall.offset;
-		}
-		assert(r->ifcall.offset + rlen <= orig.inode->meta.size);
-		doff = r->ifcall.offset-block->key;
-		assert(rlen > 0);
-		memcpy(r->ofcall.data, (uchar *)&dp[doff], rlen);
-		assert(nbytes > 0);
-		assert(nbytes >= rlen);
-		r->ofcall.count = rlen;
-
+		assert(count > 0);
+		r->ofcall.count = count;
+		memset(r->ofcall.data, 0, count);
 		respond(r, nil);
+		return;
+	}
 
-		// Free the temp buffers we created, and cache the data in
-		// lastbuf for the next calls to read now that we've sent
-		// the response.
+	wlock(a);
+	a->cache.file.lastbuf = realloc(a->cache.file.lastbuf, HAMMER2_BLOCKREF_LEAF_MAX+1);
 
-		// Store the data read from disk in aux for future reads to
-		// bypass.
-		wlock(a);
+	char *err = loadblock(block, a->cache.file.lastbuf, HAMMER2_BLOCKREF_LEAF_MAX+1, &a->cache.file.lastbufcount);
+	if (err != nil) {
+		a->cache.file.lastbufcount = 0;
 
-		free(a->cache.file.lastbuf);
-		a->cache.file.lastbuf = emalloc9p(nbytes);
-		assert(a->cache.file.lastbuf != nil);
-		memcpy(a->cache.file.lastbuf, (uchar *)&dp[0], nbytes);
-		a->cache.file.lastbufoffset = block->key;
-		a->cache.file.lastbufcount = nbytes;
+		respond(r, err);
 		wunlock(a);
-		goto cleanup;
-	case HAMMER2_BREF_TYPE_EMPTY:
-		cur->offset++;
-		goto start;
-	default:
-		printf("Type %d\n", block->type);
-		sysfatal("Unhandled type");
+		return;
 	}
-
-cleanup:
-	// Ensure there's no Aux memory leaks.
-	while(cur->parent != nil) {
-		Aux *tmp = cur;
-		cur = cur->parent;
-		free(tmp->blocks);
-		free(tmp);
+	a->cache.file.lastbufoffset = block->key;
+	assert(a->cache.file.lastbuf != nil);
+	
+	int roffset = r->ifcall.offset-block->key;
+	int count = r->ifcall.count;
+	if(r->ifcall.offset + count > cur->end){
+		count = cur->end-r->ifcall.offset;
 	}
+	assert(count > 0);
+	memcpy(r->ofcall.data, &a->cache.file.lastbuf[roffset], count);
+	r->ofcall.count = count;
+	respond(r, nil);
+	wunlock(a);
 	return;
 }
 
